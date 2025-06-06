@@ -1,0 +1,187 @@
+name: Install ArgoCD
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'EKS cluster name'
+        required: true
+        default: 'dotnet-cluster'
+        type: string
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - install
+        default: 'install'
+
+jobs:
+  install-argocd:
+    if: github.event.inputs.action == 'install'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT }}:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      - name: Install Helm
+        run: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ github.event.inputs.cluster_name }} --region ap-southeast-2
+          kubectl get nodes
+
+      - name: Install htpasswd tool
+        run: sudo apt-get update && sudo apt-get install -y apache2-utils
+
+      - name: Generate bcrypt password and export to env
+        run: |
+          BCRYPT=$(htpasswd -nbBC 10 "" '${{ secrets.ARGOCD_ADMIN_PASSWORD }}' | tr -d ':\n' | sed 's/\$2y\$/\$2a\$/')
+          echo "BCRYPT_PASSWORD=$BCRYPT" >> $GITHUB_ENV
+
+      - name: Install ArgoCD
+        run: |
+          # Create argocd namespace if it doesn't exist
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+          # Add ArgoCD Helm repository
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo update
+
+          # Create values file for ArgoCD
+          cat > argocd-values.yaml <<EOF
+          server:
+            service:
+              type: LoadBalancer
+            extraArgs:
+              - --insecure
+
+          configs:
+            secret:
+              argocdServerAdminPassword: "${BCRYPT_PASSWORD}"
+              argocdServerAdminPasswordMtime: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            params:
+              server:
+                admin:
+                  enabled: true
+          EOF
+
+          # Debug: Show cluster info
+          echo "Cluster Info:"
+          kubectl cluster-info
+          echo "Node Status:"
+          kubectl get nodes -o wide
+
+          # List all releases in the namespace
+          echo "Current releases in argocd namespace:"
+          helm list -n argocd
+
+          # Delete any existing releases
+          if helm list -n argocd | grep -q "argocd"; then
+            echo "Found existing ArgoCD release, cleaning up..."
+            helm uninstall argocd -n argocd
+          fi
+
+          # Force delete any stuck secrets
+          echo "Cleaning up any stuck secrets..."
+          kubectl delete secret argocd-secret -n argocd --ignore-not-found
+          kubectl delete secret -n argocd -l owner=helm --force --grace-period=0
+          kubectl delete secret argocd-initial-admin-secret -n argocd --ignore-not-found
+
+          # Force delete any stuck configmaps
+          echo "Cleaning up any stuck configmaps..."
+          kubectl delete configmap -n argocd -l owner=helm --force --grace-period=0
+
+          # Wait for cleanup
+          echo "Waiting for cleanup to complete..."
+          sleep 30
+
+          # Verify cleanup
+          echo "Verifying cleanup..."
+          helm list -n argocd
+
+          # Install ArgoCD
+          echo "Installing ArgoCD..."
+          helm install argocd argo/argo-cd \
+            --namespace argocd \
+            -f argocd-values.yaml \
+            --timeout 10m
+
+          # Debug: Check Helm release status
+          echo "Checking Helm release status..."
+          helm list -n argocd
+          helm status argocd -n argocd
+
+          # Debug: Check ArgoCD pods
+          echo "ArgoCD Pods:"
+          kubectl get pods -n argocd
+
+          # Wait for ArgoCD to be ready with increased timeout
+          echo "Waiting for ArgoCD deployments..."
+          kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=600s
+          kubectl wait --for=condition=available deployment/argocd-repo-server -n argocd --timeout=600s
+          kubectl wait --for=condition=available deployment/argocd-applicationset-controller -n argocd --timeout=600s
+
+          # Get ArgoCD server URL and wait for it to be available
+          echo "Waiting for ArgoCD server URL..."
+          ARGOCD_URL=""
+          for i in {1..30}; do
+            ARGOCD_URL=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            if [ ! -z "$ARGOCD_URL" ]; then
+              break
+            fi
+            echo "Waiting for LoadBalancer URL... (attempt $i/30)"
+            sleep 10
+          done
+
+          echo "ArgoCD Access Information:"
+          echo "------------------------"
+          echo "Username: admin"
+          echo "Password: ${{ secrets.ARGOCD_ADMIN_PASSWORD }}"
+          echo ""
+          echo "Access Methods:"
+          echo "1. LoadBalancer URL (if available):"
+          if [ ! -z "$ARGOCD_URL" ]; then
+            echo "   https://$ARGOCD_URL"
+          else
+            echo "   LoadBalancer URL not available yet. Please wait a few minutes and check again with:"
+            echo "   kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
+          fi
+          echo ""
+          echo "2. Port Forward Method:"
+          echo "   Run this command in your terminal:"
+          echo "   kubectl port-forward service/argocd-server -n argocd 8080:443"
+          echo "   Then access ArgoCD at: https://localhost:8080"
+          echo ""
+          echo "Note: If using port-forward, you may need to accept the certificate warning in your browser."
+
+          # Verify ArgoCD is ready
+          echo "Verifying ArgoCD installation..."
+          if kubectl get secret argocd-initial-admin-secret -n argocd &>/dev/null; then
+            echo "ArgoCD initial admin secret exists"
+          else
+            echo "Using GitHub secret for admin password"
+          fi 
