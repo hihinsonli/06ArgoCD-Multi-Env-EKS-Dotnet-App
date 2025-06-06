@@ -1,0 +1,151 @@
+name: Install ArgoCD
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'EKS cluster name'
+        required: true
+        default: 'dotnet-cluster'
+        type: string
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - install
+          - destroy
+        default: 'install'
+
+jobs:
+  install-argocd:
+    if: github.event.inputs.action == 'install'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT }}:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      - name: Install Helm
+        run: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ github.event.inputs.cluster_name }} --region ap-southeast-2
+          kubectl get nodes
+
+      - name: Install ArgoCD
+        run: |
+          # Create argocd namespace if it doesn't exist
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+          # Add ArgoCD Helm repository
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo update
+
+          # Create values file for ArgoCD
+          cat > argocd-values.yaml << EOF
+          server:
+            service:
+              type: LoadBalancer
+            extraArgs:
+              - --insecure
+          configs:
+            secret:
+              argocdServerAdminPassword: "${{ secrets.ARGOCD_ADMIN_PASSWORD }}"
+              argocdServerAdminPasswordMtime: "$(date +%s)"
+          EOF
+
+          # Install ArgoCD
+          helm upgrade --install argocd argo/argo-cd \
+            --namespace argocd \
+            -f argocd-values.yaml \
+            --wait
+
+      - name: Wait for ArgoCD to be ready
+        run: |
+          kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
+          kubectl wait --for=condition=available deployment/argocd-repo-server -n argocd --timeout=300s
+          kubectl wait --for=condition=available deployment/argocd-applicationset-controller -n argocd --timeout=300s
+
+      - name: Get ArgoCD server URL
+        run: |
+          echo "ArgoCD server URL:"
+          kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+  destroy-argocd:
+    if: github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT }}:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      - name: Install Helm
+        run: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ github.event.inputs.cluster_name }} --region ap-southeast-2
+          kubectl get nodes
+
+      - name: Uninstall ArgoCD
+        run: |
+          # Uninstall ArgoCD Helm release
+          helm uninstall argocd -n argocd
+
+          # Delete ArgoCD namespace
+          kubectl delete namespace argocd --wait=true
+
+          # Delete ArgoCD IAM service account
+          eksctl delete iamserviceaccount \
+            --cluster ${{ github.event.inputs.cluster_name }} \
+            --namespace kube-system \
+            --name aws-load-balancer-controller
+
+          # Delete AWS Load Balancer Controller IAM policy
+          POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn" --output text)
+          if [ ! -z "$POLICY_ARN" ]; then
+            aws iam delete-policy --policy-arn $POLICY_ARN
+          fi
+
+      - name: Delete EKS cluster
+        run: |
+          eksctl delete cluster \
+            --name ${{ github.event.inputs.cluster_name }} \
+            --region ap-southeast-2 \
+            --wait 

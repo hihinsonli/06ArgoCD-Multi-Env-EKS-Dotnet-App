@@ -1,0 +1,184 @@
+name: Manage EKS Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'EKS cluster name'
+        required: true
+        default: 'dotnet-cluster'
+        type: string
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - create
+          - destroy
+        default: 'create'
+
+jobs:
+  create-eks:
+    if: github.event.inputs.action == 'create'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT }}:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      - name: Install eksctl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+      - name: Create EKS cluster
+        env:
+          CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+          CLUSTER_REGION: ap-southeast-2
+        run: |
+          if ! eksctl get cluster --name $CLUSTER_NAME --region $CLUSTER_REGION --output json | jq -e '.[] | select(.Status=="ACTIVE")'; then
+            eksctl create cluster \
+              --name $CLUSTER_NAME \
+              --region $CLUSTER_REGION \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 2 \
+              --nodes-max 4 \
+              --managed \
+              --with-oidc \
+              --ssh-access \
+              --ssh-public-key k8s-sydney \
+              --vpc-cidr 10.0.0.0/16 \
+              --fargate
+          else
+            echo "Cluster ${CLUSTER_NAME} already exists in region ${CLUSTER_REGION} and is ACTIVE."
+          fi
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ github.event.inputs.cluster_name }} --region ap-southeast-2
+          kubectl get nodes
+
+      - name: Install AWS Load Balancer Controller
+        run: |
+          # Associate OIDC provider if not already associated
+          eksctl utils associate-iam-oidc-provider \
+            --cluster ${{ github.event.inputs.cluster_name }} \
+            --region ap-southeast-2 \
+            --approve
+
+          # Download IAM policy
+          curl -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/install/iam_policy.json
+
+          # Create or update IAM policy
+          POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn" --output text)
+          if [ -z "$POLICY_ARN" ]; then
+            POLICY_ARN=$(aws iam create-policy \
+              --policy-name AWSLoadBalancerControllerIAMPolicy \
+              --policy-document file://iam-policy.json \
+              --query 'Policy.Arn' \
+              --output text)
+          else
+            aws iam create-policy-version \
+              --policy-arn $POLICY_ARN \
+              --policy-document file://iam-policy.json \
+              --set-as-default
+          fi
+
+          # Create or update service account
+          eksctl create iamserviceaccount \
+            --cluster=${{ github.event.inputs.cluster_name }} \
+            --namespace=kube-system \
+            --name=aws-load-balancer-controller \
+            --attach-policy-arn=$POLICY_ARN \
+            --override-existing-serviceaccounts \
+            --approve
+
+          # Get VPC ID
+          VPC_ID=$(aws eks describe-cluster --name ${{ github.event.inputs.cluster_name }} --query "cluster.resourcesVpcConfig.vpcId" --output text)
+
+          # Install or upgrade AWS Load Balancer Controller
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName=${{ github.event.inputs.cluster_name }} \
+            --set serviceAccount.create=false \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set region=ap-southeast-2 \
+            --set vpcId=$VPC_ID
+
+      - name: Wait for AWS Load Balancer Controller
+        run: |
+          kubectl wait --for=condition=available deployment/aws-load-balancer-controller -n kube-system --timeout=300s
+
+  destroy-eks:
+    if: github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT }}:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      - name: Install eksctl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+      - name: Clean up resources
+        run: |
+          # Delete AWS Load Balancer Controller IAM service account
+          eksctl delete iamserviceaccount \
+            --cluster ${{ github.event.inputs.cluster_name }} \
+            --namespace kube-system \
+            --name aws-load-balancer-controller
+
+          # Delete AWS Load Balancer Controller IAM policy
+          POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn" --output text)
+          if [ ! -z "$POLICY_ARN" ]; then
+            # List all policy versions
+            POLICY_VERSIONS=$(aws iam list-policy-versions --policy-arn $POLICY_ARN --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text)
+            
+            # Delete all non-default versions
+            for VERSION in $POLICY_VERSIONS; do
+              aws iam delete-policy-version --policy-arn $POLICY_ARN --version-id $VERSION
+            done
+            
+            # Now delete the policy (which will also delete the default version)
+            aws iam delete-policy --policy-arn $POLICY_ARN
+          fi
+
+          # Delete EKS cluster
+          eksctl delete cluster \
+            --name ${{ github.event.inputs.cluster_name }} \
+            --region ap-southeast-2 \
+            --wait 
