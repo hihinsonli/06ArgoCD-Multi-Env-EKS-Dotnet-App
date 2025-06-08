@@ -6,12 +6,12 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/your-org/06ArgoCD-Multi-Env-EKS-Dotnet-App.git
+    repoURL: https://github.com/hihinsonli/06ArgoCD-Multi-Env-EKS-Dotnet-App.git
     targetRevision: HEAD
-    path: charts
+    path: charts/prod
     helm:
       valueFiles:
-        - prod/values.yaml
+        - values.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: dotnet-app-prod

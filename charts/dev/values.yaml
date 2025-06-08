@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: 123456789012.dkr.ecr.us-west-2.amazonaws.com/dotnet-app
+  repository: ${{ vars.AWS_ACCOUNT }}.dkr.ecr.ap-southeast-2.amazonaws.com/dotnet-app
   tag: dev
   pullPolicy: Always
 
@@ -18,7 +18,7 @@ ingress:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
   hosts:
-    - host: dev.dotnet-app.example.com
+    - host: dev-dotnet-app
       paths:
         - path: /
           pathType: Prefix

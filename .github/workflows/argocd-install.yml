@@ -130,6 +130,22 @@ jobs:
             -f argocd-values.yaml \
             --timeout 10m
 
+          # Create repository secret
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: dotnet-app-repo
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repository
+          stringData:
+            type: git
+            url: https://github.com/hihinsonli/06ArgoCD-Multi-Env-EKS-Dotnet-App.git
+            username: hihinsonli
+            password: ${{ secrets.REPO_TOKEN }}
+          EOF
+
           # Debug: Check Helm release status
           echo "Checking Helm release status..."
           helm list -n argocd
