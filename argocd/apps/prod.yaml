@@ -9,9 +9,6 @@ spec:
     repoURL: https://github.com/hihinsonli/06ArgoCD-Multi-Env-EKS-Dotnet-App.git
     targetRevision: HEAD
     path: charts/prod
-    helm:
-      valueFiles:
-        - values.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: dotnet-app-prod

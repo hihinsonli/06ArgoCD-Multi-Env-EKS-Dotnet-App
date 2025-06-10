@@ -1,7 +1,7 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "dotnet-app.name" -}}
+{{- define "dotnet-app-base.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
@@ -10,7 +10,7 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contains chart name it will be used as a full name.
 */}}
-{{- define "dotnet-app.fullname" -}}
+{{- define "dotnet-app-base.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -26,16 +26,16 @@ If release name contains chart name it will be used as a full name.
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "dotnet-app.chart" -}}
+{{- define "dotnet-app-base.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "dotnet-app.labels" -}}
-helm.sh/chart: {{ include "dotnet-app.chart" . }}
-{{ include "dotnet-app.selectorLabels" . }}
+{{- define "dotnet-app-base.labels" -}}
+helm.sh/chart: {{ include "dotnet-app-base.chart" . }}
+{{ include "dotnet-app-base.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -45,17 +45,17 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels
 */}}
-{{- define "dotnet-app.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "dotnet-app.name" . }}
+{{- define "dotnet-app-base.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "dotnet-app-base.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Create the name of the service account to use
 */}}
-{{- define "dotnet-app.serviceAccountName" -}}
+{{- define "dotnet-app-base.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "dotnet-app.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "dotnet-app-base.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}

@@ -1,6 +1,6 @@
 apiVersion: v2
-name: dotnet-app
-description: Base Helm chart for .NET application
-type: application
+name: dotnet-app-base
+description: A base Helm chart for .NET Core application
+type: library
 version: 0.1.0
 appVersion: "1.0.0" 

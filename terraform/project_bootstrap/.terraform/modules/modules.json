@@ -1,1 +1,0 @@
-{"Modules":[{"Key":"iam_policies","Source":"../modules/iam/iam-policy","Dir":"../modules/iam/iam-policy"},{"Key":"iam_roles","Source":"../modules/iam/iam-role","Dir":"../modules/iam/iam-role"},{"Key":"s3_terraform_state","Source":"../modules/s3","Dir":"../modules/s3"},{"Key":"","Source":"","Dir":"."}]}
